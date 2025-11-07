@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta name="application-id" content="com.ali.kacmaz">
+<link rel="manifest" href="manifest.json">
+
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Galaxy Dodge — Ultimate Pack</title>
+<style>
+  :root{--bg:#000;--ui:#e6f0ff}
+  html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui;background:radial-gradient(circle at 20% 10%, #001026, #000);color:var(--ui)}
+  #app{max-width:960px;margin:12px auto;padding:12px}
+  canvas{display:block;margin:8px auto;border-radius:8px;background:#000;touch-action:none}
+  header{display:flex;gap:12px;align-items:center;justify-content:space-between}
+  .btn{background:#2563eb;color:white;padding:8px 12px;border-radius:8px;border:none;cursor:pointer}
+  .muted{opacity:0.8;font-size:13px}
+  .row{display:flex;gap:8px;align-items:center}
+  .small{font-size:13px}
+  .panel{background:rgba(255,255,255,0.03);padding:8px;border-radius:8px;margin-top:8px}
+  a.link{color:#84ccff}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div>
+      <h1 style="margin:0">Galaxy Dodge — Ultimate</h1>
+      <div class="muted small">Tüm özellik paketi (boss, power-up, shooter, deploy-ready)</div>
+    </div>
+    <div class="row">
+      <button id="startBtn" class="btn">Başla</button>
+      <button id="menuBtn" class="btn" style="background:#10b981">Menü</button>
+    </div>
+  </header>
+
+  <img id="spr" src="sprites.png" style="display:none">
+<canvas id="game" width="720" height="1280"></canvas>
+
+  <div class="panel">
+    <div class="row">
+      <div>Skor: <strong id="score">0</strong></div>
+      <div style="margin-left:12px">En iyi: <strong id="best">0</strong></div>
+      <div style="margin-left:12px" id="hp">HP: 3</div>
+      <div style="margin-left:12px" id="shield">Shield: 0</div>
+    </div>
+    <div style="margin-top:8px" class="small muted">
+      Not: Bu paket lokal skor & optional remote-skor (Supabase) desteği içerir. README içinde Netlify/Firebase/Supabase deploy adımları var.
+    </div>
+  </div>
+
+  <section class="panel" id="controls">
+    <div class="small">Kontroller: Dokun / sürükle (parmak hizasında), tap/click = ateş, swipe up hızlı boost</div>
+    <div style="margin-top:8px" class="row">
+      <button id="showLeaderboard" class="btn" style="background:#7c3aed">Liderlik Tablosu</button>
+      <button id="downloadPkg" class="btn" style="background:#f59e0b">İndir Paket</button>
+      <div style="margin-left:12px" class="small">Remote skor kullanmak için Supabase bilgilerini README'ye göre ekle.</div>
+    </div>
+  </section>
+
+  <section class="panel" id="leaderboardPanel" style="display:none;margin-top:10px">
+    <h3 style="margin:0 0 6px 0">Liderlik Tablosu (Local)</h3>
+    <ol id="localBoard"></ol>
+    <div class="small muted">Remote (sunucu) için Supabase/Netlify fonksiyonu örneği paket içinde.</div>
+  </section>
+
+  <section class="panel small" id="readmeShort" style="margin-top:10px">
+    <strong>Hızlı notlar:</strong>
+    <ul>
+      <li>Bu çalıştırılabilir tek sayfa oyun — index.html'i açarak oynayabilirsin.</li>
+      <li>Remote leaderboard: paket içinde Netlify function örneği ve Supabase örnek kodu var. Kendi anahtarınla deploy et.</li>
+      <li>Android APK: Capacitor + Ionic/Vanilla adımları README'de. (Ben doğrudan APK üretemiyorum ama build talimatı mevcut.)</li>
+    </ul>
+  </section>
+</div>
+
+<script>
+/* ========= CORE GAME (condensed, well-commented) =========
+Features included:
+ - Finger-aligned drag control
+ - Boost swipe detection
+ - Tap/click to shoot (bullets)
+ - Power-ups (shield, health, score)
+ - Boss fight (periodic, with health bar)
+ - Particles and simple sprite placeholders (vector art)
+ - Local leaderboard (localStorage)
+ - Hooks for remote scoreboard (SUPABASE) via provided functions (needs env keys)
+*/
+
+// canvas setup (responsive)
+
+// sprite assets
+
+// load sprites
+const playerImg=new Image(); playerImg.src="sprites/player.png";
+const enemyImgs=[1,2,3,4].map(i=>{let im=new Image(); im.src="sprites/enemy"+i+".png"; return im;});
+const bossImg=new Image(); bossImg.src="sprites/boss.png";
+const powerImgs={shield:"sprites/pu_shield.png",bomb:"sprites/pu_bomb.png",life:"sprites/pu_life.png",fire:"sprites/pu_fire.png"};
+
+
+const spr=document.getElementById('spr');
+const bulletImg=new Image(); bulletImg.src="bullet.png";
+const explosionFrames=[0,1,2,3,4,5].map(i=>{let im=new Image(); im.src="explosion_"+i+".png"; return im;});
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const W = canvas.width, H = canvas.height;
+
+let state = 'menu'; // menu | playing | boss | gameover
+let score = 0;
+let best = Number(localStorage.getItem('gd_best')||0);
+document.getElementById('best').textContent = best;
+
+let player = { x: W/2, y: H - 180, size: 44, hp: 3, shield: 0 };
+let bullets = [], enemies = [], powerups = [], particles = [];
+let spawnTimer = 0, spawnRate = 110, baseSpeed = 1.2, difficulty = 0;
+let boss = null, bossTimer = 0;
+
+function rand(min,max){return Math.random()*(max-min)+min;}
+
+// input: finger-aligned drag (pointer events)
+let pointerDown=false, lastTouch=null;
+function setPlayerTo(px,py){ player.x = Math.max(40, Math.min(W-40, px)); player.y = Math.max(60, Math.min(H-60, py)); }
+
+canvas.addEventListener('pointerdown', e=>{ pointerDown=true; lastTouch={x:e.clientX,y:e.clientY,t:Date.now()}; setPlayerTo(e.clientX * (W/canvas.clientWidth), e.clientY * (H/canvas.clientHeight)); });
+canvas.addEventListener('pointermove', e=>{ if(pointerDown && state==='playing') setPlayerTo(e.clientX * (W/canvas.clientWidth), e.clientY * (H/canvas.clientHeight)); });
+canvas.addEventListener('pointerup', e=>{ pointerDown=false;
+  if(lastTouch){
+    const dt = Date.now()-lastTouch.t;
+    const dy = lastTouch.y - (e.clientY || lastTouch.y);
+    // swipe up detection for boost
+    if(dt < 250 && dy > 60){
+      player.boost = true;
+      setTimeout(()=>player.boost=false, 420);
+      playBeep(700, 0.05);
+    } else {
+      // quick tap => shoot
+      if(state==='playing') fireBullet();
+      if(state==='menu'){ startGame(); }
+      if(state==='gameover'){ startGame(); }
+    }
+  }
+  lastTouch=null;
+});
+
+// mouse click shoot for desktop (separate)
+canvas.addEventListener('click', e=>{ if(state==='playing') fireBullet(); if(state==='menu') startGame(); });
+
+// basic audio beep using WebAudio
+function playBeep(freq, dur=0.05){
+  try{
+    const a = new (window.AudioContext || window.webkitAudioContext)();
+    const o = a.createOscillator(), g = a.createGain();
+    o.connect(g); g.connect(a.destination);
+    o.type = 'sine'; o.frequency.value = freq;
+    g.gain.value = 0.02;
+    o.start(); g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime+dur);
+    setTimeout(()=>{ o.stop(); a.close(); }, (dur+0.02)*1000);
+  }catch(e){}
+}
+
+// gameplay functions
+function spawnEnemy(){
+  // fewer enemies: spawn probability reduced; some are hardy (hp)
+  if(Math.random() < 0.6) {
+    enemies.push({ x: rand(40, W-90), y: -60, size: 72, hp: 1, speed: baseSpeed * rand(0.9,1.25), type: 'ufo' });
+  } else {
+    enemies.push({ x: rand(40, W-90), y: -60, size: 110, hp: 2, speed: baseSpeed * rand(0.6,1.0), type: 'heavy' });
+  }
+}
+
+function spawnPowerup(){
+  const types = ['shield','heal','score'];
+  const t = types[Math.floor(Math.random()*types.length)];
+  powerups.push({ x: rand(40,W-60), y:-40, size:40, type: t });
+}
+
+function fireBullet(){
+  bullets.push({ x: player.x, y: player.y-48, vy: -12, size: 8 });
+  playBeep(880, 0.04);
+}
+
+function spawnBoss(){
+  boss = { x: W/2 - 180, y: -240, w: 360, h: 160, hp: 18, phase:0, alive:true, timer:0 };
+  state = 'boss';
+  playBeep(240, 0.1);
+}
+
+// update loop
+function update(dt){
+  if(state==='menu' || state==='gameover') return;
+
+  difficulty += 0.0006;
+  baseSpeed = Math.min(6.5, baseSpeed + 0.0008);
+  spawnRate = Math.max(40, Math.floor(110 - difficulty*40));
+
+  // spawn fewer enemies overall (user asked)
+  spawnTimer += 1;
+  if(spawnTimer > spawnRate){ spawnTimer=0; if(Math.random() < 0.7) spawnEnemy(); if(Math.random()<0.02) spawnPowerup(); }
+
+  // boss scheduling
+  bossTimer += dt;
+  if(bossTimer > 22000 && !boss){ bossTimer = 0; spawnBoss(); }
+
+  // move bullets
+  bullets.forEach(b=> b.y += b.vy );
+  bullets = bullets.filter(b => b.y > -30 );
+
+  // move enemies
+  enemies.forEach(e => { e.y += e.speed * (player.boost?2.2:1); });
+  enemies = enemies.filter(e => {
+    // collision with bullets
+    bullets.forEach(b => {
+      const dx = b.x - (e.x + e.size/2), dy = b.y - (e.y + e.size/2);
+      if(Math.hypot(dx,dy) < e.size/2 + (b.size||6)){
+        e.hp -= 1; b.y = -999; particles.push({x:e.x+e.size/2,y:e.y+e.size/2,t:18});
+        playBeep(220,0.03);
+      }
+    });
+    // collision with player
+    const dx = player.x - (e.x + e.size/2), dy = player.y - (e.y + e.size/2);
+    if(Math.hypot(dx,dy) < player.size + e.size/2){
+      if(player.shield>0){ player.shield--; e.hp=0; playBeep(320,0.03); }
+      else { player.hp--; e.hp=0; playBeep(120,0.08); if(player.hp<=0) { state='gameover'; saveBest(); } }
+    }
+    if(e.hp<=0){ score += 1; return false; }
+    if(e.y > H+120){ return false; }
+    return true;
+  });
+
+  // powerups
+  powerups.forEach(p => p.y += 2.2);
+  powerups = powerups.filter(p => {
+    const dx = player.x - p.x, dy = player.y - p.y;
+    if(Math.hypot(dx,dy) < player.size + p.size/2){
+      if(p.type==='shield'){ player.shield = Math.min(3, player.shield+1); playBeep(600,0.06); }
+      if(p.type==='heal'){ player.hp = Math.min(5, player.hp+1); playBeep(780,0.06); }
+      if(p.type==='score'){ score += 5; playBeep(1000,0.06); }
+      return false;
+    }
+    return p.y < H + 80;
+  });
+
+  // boss behavior
+  if(state==='boss' && boss){
+    boss.timer += dt;
+    boss.y += 0.9;
+    if(boss.y > 60) boss.y = 60;
+    // boss shoots bullets
+    if(Math.random() < 0.02 + difficulty*0.0008) {
+      // spawn small enemy shots as obstacles
+      enemies.push({ x: boss.x + Math.random()*(boss.w-40), y: boss.y + boss.h, size: 28, hp:1, speed: 3 + difficulty });
+    }
+    // bullets hit boss
+    bullets.forEach(b=>{
+      if(b.x > boss.x && b.x < boss.x + boss.w && b.y > boss.y && b.y < boss.y + boss.h){
+        boss.hp -= 1; b.y=-999; particles.push({x:b.x,y:b.y,t:18});
+        if(boss.hp<=0){ boss.alive=false; state='playing'; score += 20; boss=null; playBeep(140,0.15); }
+      }
+    });
+  }
+
+  // particles life
+  particles.forEach(p=>p.t--);
+  particles = particles.filter(p=>p.t>0);
+
+  // clamp player in bounds
+  player.x = Math.max(30, Math.min(W-30, player.x));
+  player.y = Math.max(40, Math.min(H-40, player.y));
+
+  // update HUD
+  document.getElementById('score').textContent = score;
+  document.getElementById('hp').textContent = 'HP: ' + player.hp;
+  document.getElementById('shield').textContent = 'Shield: ' + player.shield;
+}
+
+// render
+function draw(){
+  drawExplosions();
+  // parallax background (simple)
+  ctx.fillStyle = '#000010';
+  ctx.fillRect(0,0,W,H);
+  for(let s=0;s<120;s++){
+    ctx.fillStyle = 'rgba(200,220,255,' + (0.2*Math.sin((s+Date.now()/1000)/6)+0.5) + ')';
+    const x = (s*73)%W, y = ((s*47)+ (Date.now()/30 * (s%3+1)))%H;
+    ctx.fillRect(x, y, 2, 2);
+  }
+
+  // draw powerups
+  powerups.forEach(p=>{
+    if(p.type==='shield'){ ctx.fillStyle='#4dd0e1'; ctx.beginPath(); ctx.arc(p.x,p.y,p.size/2,0,Math.PI*2); ctx.fill(); ctx.fillStyle='rgba(0,0,0,0.1)'; ctx.fillRect(p.x-10,p.y-6,20,6); }
+    if(p.type==='heal'){ ctx.fillStyle='#34d399'; ctx.fillRect(p.x-12,p.y-12,24,24); ctx.fillStyle='white'; ctx.fillRect(p.x-4,p.y-2,8,4); }
+    if(p.type==='score'){ ctx.fillStyle='#f59e0b'; ctx.beginPath(); ctx.moveTo(p.x,p.y-12); ctx.lineTo(p.x-10,p.y+12); ctx.lineTo(p.x+10,p.y+12); ctx.closePath(); ctx.fill(); }
+  });
+
+  // draw // draw player sprite
+  const spr=document.getElementById('spr');
+  const pw=64,ph=64; // assume square sprite crop
+  ctx.ctx.drawImage(playerImg,player.x-player.size,player.y-player.size,player.size*2,player.size*2);
+
+  // draw bullets
+  ctx.fillStyle = '#ffec99';
+  bullets.forEach(b=> ctx.fillRect(b.x-4, b.y-12, 8, 16) );
+
+  // draw enemies
+  enemies.forEach(e=>{
+    if(e.type==='heavy'){
+      ctx.fillStyle='#ff6b6b';
+      ctx.beginPath(); ctx.ellipse(e.x+e.size/2, e.y+e.size/2, e.size/2, e.size/3, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle='#ffe9c4'; ctx.beginPath(); ctx.ellipse(e.x+e.size/2, e.y+e.size/2-12, e.size/3, e.size/6,0,0,Math.PI*2); ctx.fill();
+    } else {
+      ctx.fillStyle='#ff8a65';
+      ctx.beginPath(); ctx.ellipse(e.x+e.size/2, e.y+e.size/2, e.size/2, e.size/3, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle='#fff7cc'; ctx.beginPath(); ctx.ellipse(e.x+e.size/2, e.y+e.size/2-8, e.size/3, e.size/6,0,0,Math.PI*2); ctx.fill();
+    }
+  });
+
+  // boss
+  if(boss){
+    ctx.fillStyle='#7c3aed';
+    ctx.fillRect(boss.x, boss.y, boss.w, boss.h);
+    // boss hp bar
+    ctx.fillStyle='red';
+    ctx.fillRect(W/2 - 150, 20, 300 * (boss.hp / 18), 18);
+    ctx.strokeStyle='white'; ctx.strokeRect(W/2 -150, 20, 300, 18);
+  }
+
+  // particles
+  ctx.fillStyle='orange';
+  particles.forEach(p=> ctx.fillRect(p.x, p.y, 3, 3) );
+
+  // HUD small
+  ctx.fillStyle='white'; ctx.font='20px system-ui'; ctx.fillText('Score: ' + score, 16, 28);
+  ctx.fillText('HP: ' + player.hp, W - 120, 28);
+  if(player.shield>0) ctx.fillText('Shield: ' + player.shield, W - 120, 60);
+}
+
+// main loop
+let last = performance.now();
+function loop(now){
+  const dt = now - last; last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// start/reset/save
+function startGame(){ state='playing'; resetGameVars(); }
+function resetGameVars(){ score=0; player.hp=3; player.shield=0; bullets=[]; enemies=[]; powerups=[]; particles=[]; baseSpeed=1.2; spawnTimer=0; spawnRate=110; boss=null; }
+function saveBest(){ best = Math.max(best, score); localStorage.setItem('gd_best', best); document.getElementById('best').textContent = best; }
+
+// buttons
+document.getElementById('startBtn').addEventListener('click', ()=>{ if(state==='menu') startGame(); else if(state==='gameover'){ startGame(); }});
+document.getElementById('menuBtn').addEventListener('click', ()=>{ state='menu'; });
+document.getElementById('showLeaderboard').addEventListener('click', ()=>{ renderLocalBoard(); document.getElementById('leaderboardPanel').style.display='block'; });
+document.getElementById('downloadPkg').addEventListener('click', ()=>{ window.location.href = 'galaxy_dodge_full_package.zip'; });
+
+// local leaderboard (simple)
+function renderLocalBoard(){
+  const list = document.getElementById('localBoard');
+  list.innerHTML = '';
+  const raw = JSON.parse(localStorage.getItem('gd_local_scores') || '[]');
+  raw.slice(0,10).forEach(s => {
+    const li = document.createElement('li');
+    li.textContent = s.name + ' — ' + s.score;
+    list.appendChild(li);
+  });
+}
+
+// when game over offer to save score
+window.addEventListener('keydown', e=>{ if(e.key==='s' && state==='gameover'){ const name = prompt('Skorunu isimle kaydet (local):', 'Player') || 'Player'; saveLocalScore(name, score); renderLocalBoard(); }});
+
+// simple local save
+function saveLocalScore(name, sc){
+  const arr = JSON.parse(localStorage.getItem('gd_local_scores') || '[]');
+  arr.unshift({name, score: sc, date: Date.now()});
+  localStorage.setItem('gd_local_scores', JSON.stringify(arr.slice(0,200)));
+}
+
+// ---- Remote scoreboard hooks (Supabase example) ----
+// These functions are placeholders — to use remote leaderboards:
+//
+// 1) Create a Supabase project (free tier) and a table `scores` with columns: id (uuid), name (text), score (int), created_at (timestamp)
+// 2) Copy the SUPABASE_URL and SUPABASE_KEY into Netlify environment variables or client config
+// 3) Use the included netlify/functions/submit-score.js and get-scores.js function examples and deploy to Netlify (see README.md in package)
+//
+// Example client call (uncomment when you have SUPABASE): 
+/*
+async function submitRemoteScore(name, sc){
+  const SUPABASE_URL = 'https://your.supabase.url';
+  const SUPABASE_KEY = 'public-or-service-key';
+  await fetch('/.netlify/functions/submit-score', {
+    method:'POST', body: JSON.stringify({ name, score: sc })
+  });
+}
+*/
+
+</script>
+</body>
+</html>
+
+// explosion storage
+let explosions=[];
+function spawnExplosion(x,y){ explosions.push({x,y,frame:0}); }
+function drawExplosions(){
+  for(let e of explosions){
+    let img=explosionFrames[Math.floor(e.frame)];
+    ctx.drawImage(img,e.x-16,e.y-16,32,32);
+    e.frame+=0.3;
+  }
+  explosions=explosions.filter(e=>e.frame<6);
+}
