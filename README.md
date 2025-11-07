@@ -1,1 +1,1 @@
-sarıyor
+iyi
